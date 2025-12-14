@@ -1,20 +1,20 @@
 #API配置
-OPENAI_API_KEY = 
-OPENAI_API_BASE = 
-MODEL_NAME = 
-OPENAI_EMBEDDING_MODEL = 
+OPENAI_API_KEY = "sk-341246dceaac45bdb7e7ac330b041cba"
+OPENAI_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+MODEL_NAME = "qwen3-max"
+OPENAI_EMBEDDING_MODEL = "text-embedding-v4"
 
 # 数据目录配置
-DATA_DIR = 
+DATA_DIR = "./data"
 
 #向量数据库配置
 VECTOR_DB_PATH = "./vector_db"
-COLLECTION_NAME = 
+COLLECTION_NAME = "data_structure"
 
 # 文本处理配置
-CHUNK_SIZE = 
-CHUNK_OVERLAP = 
-MAX_TOKENS = 
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+MAX_TOKENS = 2000
 
 # RAG配置
-TOP_K = 
+TOP_K = 5

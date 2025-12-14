@@ -26,7 +26,18 @@ class DocumentLoader:
         3. 格式化为"--- 第 X 页 ---\n文本内容\n"
         4. 返回pdf内容列表，每个元素包含 {"text": "..."}
         """
-        pass
+        results = []
+        try:
+            reader = PdfReader(file_path)
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    # 格式化页眉信息，有助于LLM定位来源
+                    formatted_text = f"--- 第 {i+1} 页 ---\n{text}\n"
+                    results.append({"text": formatted_text})
+        except Exception as e:
+            print(f"Error reading PDF {file_path}: {e}")
+        return results
 
     def load_pptx(self, file_path: str) -> List[Dict]:
         """加载PPT文件，按幻灯片返回内容
@@ -38,7 +49,26 @@ class DocumentLoader:
         3. 格式化为"--- 幻灯片 X ---\n文本内容\n"
         4. 返回幻灯片内容列表，每个元素包含 {"text": "..."}
         """
-        pass
+        results = []
+        try:
+            prs = Presentation(file_path)
+            for i, slide in enumerate(prs.slides):
+                slide_texts = []
+                # 遍历幻灯片中的所有形状
+                for shape in slide.shapes:
+                    # 检查形状是否有文本框且包含文本
+                    if hasattr(shape, "text") and shape.text:
+                        slide_texts.append(shape.text)
+                
+                # 将同一页PPT的内容合并
+                page_content = "\n".join(slide_texts)
+                
+                if page_content.strip():
+                    formatted_text = f"--- 幻灯片 {i+1} ---\n{page_content}\n"
+                    results.append({"text": formatted_text})
+        except Exception as e:
+            print(f"Error reading PPTX {file_path}: {e}")
+        return results
 
     def load_docx(self, file_path: str) -> str:
         """加载DOCX文件
@@ -47,7 +77,13 @@ class DocumentLoader:
         1. 使用docx2txt读取DOCX文件
         2. 返回文本内容
         """
-        pass
+        try:
+            # docx2txt 直接提取所有文本
+            text = docx2txt.process(file_path)
+            return text
+        except Exception as e:
+            print(f"Error reading DOCX {file_path}: {e}")
+            return ""
 
     def load_txt(self, file_path: str) -> str:
         """加载TXT文件
@@ -56,7 +92,13 @@ class DocumentLoader:
         1. 使用open读取TXT文件（注意使用encoding="utf-8"）
         2. 返回文本内容
         """
-        pass
+        try:
+            # 使用 utf-8 读取，errors='ignore' 防止遇到特殊字符导致崩溃
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()
+        except Exception as e:
+            print(f"Error reading TXT {file_path}: {e}")
+            return ""
 
     def load_document(self, file_path: str) -> List[Dict[str, str]]:
         """加载单个文档，PDF和PPT按页/幻灯片分割，返回文档块列表"""
