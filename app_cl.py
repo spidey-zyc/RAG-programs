@@ -8,6 +8,17 @@ import shutil
 from rag_agent import RAGAgent
 from chat_manager import ChatManager
 
+
+
+# [新增] 挂载静态目录，让前端能访问 static/images 下的图片
+from chainlit.server import app
+from fastapi.staticfiles import StaticFiles
+# 1. 导入 config 中定义好的跨平台路径
+from config import STATIC_DIR 
+
+
+
+
 # === HTML 内容定义 ===
 # 注意：更新 Chainlit 后，这里可以使用 cl.Html 组件
 # 我们可以恢复规范的 HTML 写法，不需要那个 "\u200B" 欺骗字符了
@@ -42,6 +53,11 @@ BASE_DATA_PATH = os.path.join(".", "data")
 PROCESS_SCRIPT_PATH = os.path.join(".", "process_data.py")
 
 os.makedirs(BASE_DATA_PATH, exist_ok=True)
+
+# 2. 确保目录存在 (使用导入的路径变量)
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # === 辅助函数 ===
 def clean_html(html_str):
@@ -307,16 +323,45 @@ async def main(message: cl.Message):
 
     async with cl.Step(name="SCARAG 思考中...", type="tool") as step:
         step.input = final_query
-        context_str, results = await cl.make_async(agent.retrieve_context)(final_query)
-        step.output = f"检索到 {len(results)} 条资料"
+        context_str, results = await cl.make_async(agent.retrieve_context)(final_query)              
+
         
+        # === 核心修改：可视化检索结果 ===
+        elements = []
         detail_text = ""
+        
         for i, res in enumerate(results):
-            detail_text += f"### 来源 {i+1}: {res['metadata']['filename']}\n"
-            if res['metadata'].get('page_number'):
-                detail_text += f"*(P{res['metadata']['page_number']})*\n"
-            detail_text += f"```text\n{res['content'][:200]}...\n```\n\n"
-        step.elements = [cl.Text(name="检索详情", content=detail_text, display="inline")]
+            meta = res['metadata']
+            score = res.get('score', 0)
+            
+            # 构建文本详情
+            detail_text += f"### 来源 {i+1}: {meta['filename']}\n"
+            detail_text += f"```text\n{res['content'][:200]}...\n```\n"
+            
+            # 检查是否有图片路径
+            img_path = meta.get("image_path")
+            if img_path and img_path.strip():
+                # img_path 是类似 "./static/images/theme/xxx.png"
+                # Chainlit Image 组件可以直接读取本地路径
+                
+                # 为了在 Step 中展示，我们使用 cl.Image
+                # 注意 name 必须唯一
+                image_name = f"image_source_{i}"
+                try:
+                    # 将图片添加到 elements
+                    elements.append(
+                        cl.Image(path=img_path, name=image_name, display="inline")
+                    )
+                    detail_text += f"**[已加载关联图片: {image_name}]**\n\n"
+                except Exception as e:
+                    print(f"加载图片失败: {e}")
+            else:
+                detail_text += "\n"
+                
+        step.output = f"检索到 {len(results)} 条资料"
+        elements.insert(0, cl.Text(name="检索详情", content=detail_text, display="inline"))
+        
+        step.elements = elements
 
     source_elements = []
     for idx, doc in enumerate(results):
@@ -326,9 +371,28 @@ async def main(message: cl.Message):
         element = cl.Text(name=source_name, content=content_preview, display="side")
         source_elements.append(element)
 
+# 1. 准备最终回答需要的图片 (从 elements 里挑出图片)
+    # 我们不要那个 "检索详情" 的 cl.Text，因为它太长了，留在 Step 里就好
+    final_images = [el for el in elements if isinstance(el, cl.Image)]
+
+    # 2. 准备侧边栏的引用源 (source_elements)
+    source_elements = []
+    for idx, doc in enumerate(results):
+        meta = doc['metadata']
+        source_name = f"参考来源 {idx+1}"
+        content_preview = f"文件: {meta.get('filename')}\n页码: {meta.get('page_number', 'N/A')}\n\n{doc['content']}"
+        # display="side" 表示在侧边栏显示
+        element = cl.Text(name=source_name, content=content_preview, display="side")
+        source_elements.append(element)
+
+    # 3. 初始化消息并发送
     final_answer_msg = cl.Message(content="")
+    
+    # 【关键修改】初始只带图片
+    final_answer_msg.elements = final_images 
     await final_answer_msg.send()
 
+    # 4. 生成与流式输出
     full_answer = await cl.make_async(agent.generate_response)(
         query=message.content,
         context=context_str,
@@ -340,7 +404,10 @@ async def main(message: cl.Message):
         await final_answer_msg.stream_token(char)
         await asyncio.sleep(0.002)
     
-    final_answer_msg.elements = source_elements
+    # 5. 【关键修改】合并图片和侧边栏引用，避免覆盖
+    # 这样图片会保留在消息下方，引用会出现在侧边栏
+    final_answer_msg.elements = final_images + source_elements
+    
     await final_answer_msg.update()
 
     chat_manager.append_message("assistant", full_answer)

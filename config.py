@@ -28,6 +28,11 @@ VISION_MODEL_NAME = "qwen-vl-plus"
 # ==========================================
 # 数据目录配置
 DATA_DIR = os.path.join(".", "data")
+# [新增] 提取图片的存储根目录
+IMAGES_DIR = os.path.join(".", "static", "images")
+
+# "." 代表当前运行目录
+STATIC_DIR = os.path.join(".", "static")
 
 # 向量数据库配置
 VECTOR_DB_PATH = os.path.join(".", "vector_db")
