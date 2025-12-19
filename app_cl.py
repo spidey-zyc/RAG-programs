@@ -7,6 +7,7 @@ import subprocess
 import shutil
 from rag_agent import RAGAgent
 from chat_manager import ChatManager
+import re
 
 
 
@@ -98,17 +99,34 @@ async def update_settings_panel(chat_manager, current_theme):
 @cl.on_chat_start
 async def start():
     cl.user_session.set("css", "/public/custom.css")
-    
-    agent = RAGAgent()
+
     chat_manager = ChatManager()
-    chat_manager.create_new_chat()
+    existing_chats = chat_manager.list_chats()
     
-    cl.user_session.set("agent", agent)
-    cl.user_session.set("chat_manager", chat_manager)
-    
+    chat_reused = False
+    if existing_chats:
+        # 取最新的一个会话
+        latest_chat = existing_chats[0]
+        # 加载它看看是不是空的
+        msgs = chat_manager.load_chat_by_filename(latest_chat["filename"])
+        if not msgs:  # 如果消息列表为空
+            # 复用这个会话，不再创建新的
+            chat_manager.current_filename = latest_chat["filename"]
+            chat_manager.current_chat_name = latest_chat.get("chat_name", latest_chat["filename"]) # 视具体实现而定
+            chat_reused = True
+            # print(f"DEBUG: 复用空会话 {chat_manager.current_filename}")
+
+    # 只有在没有复用时，才创建新的
+    if not chat_reused:
+        chat_manager.create_new_chat()
     existing_themes = get_themes()
     default_theme = existing_themes[0] if existing_themes else "Default"
+
+    agent = RAGAgent(initial_theme=default_theme)
+    
+    cl.user_session.set("chat_manager", chat_manager)
     cl.user_session.set("current_theme", default_theme)
+    cl.user_session.set("agent", agent)
     
     # === 使用 cl.Html 组件 (需要更新 chainlit) ===
     raw_html = WELCOME_HTML + f'<div style="text-align:center; color:#999; margin-top:10px; font-size:12px;">当前会话: {chat_manager.current_chat_name}</div>'
@@ -125,8 +143,8 @@ async def start():
 @cl.on_settings_update
 async def on_settings_update(settings):
     """处理设置变更"""
+    agent = cl.user_session.get("agent") 
     chat_manager = cl.user_session.get("chat_manager")
-    
     selected_filename = settings["session_select"]
     new_name = settings["rename_session"]
     selected_theme = settings["theme_select"]
@@ -237,19 +255,49 @@ async def on_settings_update(settings):
             return
 
     # === 5. 主题切换/新建 ===
-    if selected_theme == "🆕 创建新主题...":
-        if new_theme_name_input and new_theme_name_input.strip():
-            current_theme = new_theme_name_input.strip()
-            new_theme_path = os.path.join(BASE_DATA_PATH, current_theme)
-            os.makedirs(new_theme_path, exist_ok=True)
-            await cl.Message(content=f"📂 已创建新主题: **{current_theme}**").send()
-        else:
-            current_theme = "Default"
-    else:
-        current_theme = selected_theme
+    CREATE_THEME_LABEL = "🆕 创建新主题..." 
     
-    cl.user_session.set("current_theme", current_theme)
-    await update_settings_panel(chat_manager, current_theme)
+    target_theme = selected_theme
+
+    # 逻辑分支 A: 用户选择了新建
+    if selected_theme == CREATE_THEME_LABEL:
+        if new_theme_name_input and new_theme_name_input.strip():
+            # 获取用户输入的新名字
+            new_theme_name = new_theme_name_input.strip()
+
+            if not re.match(r'^[a-zA-Z0-9_-]+$', target_theme):
+                await cl.Message(content=f"⚠️ 警告：主题名 `{target_theme}` 可能包含非法字符，建议仅使用英文和数字。").send()
+            
+            # 【关键修正 1】必须更新 target_theme，这才是后续逻辑用到的变量
+            target_theme = new_theme_name 
+            
+            # 创建物理文件夹
+            new_theme_path = os.path.join(BASE_DATA_PATH, target_theme)
+            os.makedirs(new_theme_path, exist_ok=True)
+            await cl.Message(content=f"📂 已创建新主题: **{target_theme}**").send()
+        else:
+            # 用户选了新建但没填名字 -> 回退到 Default
+            target_theme = "Default"
+
+    # 【关键修正 2】最终安全检查（兜底策略）
+    # 如果经过上面的逻辑，target_theme 还是那个 UI 字符串（极其罕见的情况），强制重置
+    if target_theme == CREATE_THEME_LABEL:
+        target_theme = "Default"
+
+    # 执行切换
+    # 注意：这里对比的是 session 里的旧主题
+    if target_theme != cl.user_session.get("current_theme"):
+        # 1. 更新 Session 状态
+        cl.user_session.set("current_theme", target_theme)
+        
+        # 2. 通知 Agent 切换底层向量库 (现在传进去的是干净的名字了)
+        agent.reload_knowledge_base(target_theme)
+        
+        await cl.Message(content=f"🔄 知识库已切换为: **{target_theme}** (搜索范围已更新)").send()
+
+    # 刷新设置面板
+    # 注意：这里要传 target_theme，确保下拉框选中当前生效的主题
+    await update_settings_panel(chat_manager, target_theme)
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -257,9 +305,13 @@ async def main(message: cl.Message):
     welcome_id = cl.user_session.get("welcome_msg_id")
     if welcome_id:
         try:
-            await cl.Message(id=welcome_id).remove()
+            # 关键修改：添加 content="" 参数
+            await cl.Message(content="", id=welcome_id).remove()
             cl.user_session.set("welcome_msg_id", None)
-        except Exception: pass
+        except Exception as e:
+            # 打印错误但不阻断流程
+            print(f"DEBUG: 移除欢迎页失败: {e}")
+            cl.user_session.set("welcome_msg_id", None)
 
     # ... (保持原有的 main 逻辑不变) ...
     agent = cl.user_session.get("agent")
@@ -276,7 +328,9 @@ async def main(message: cl.Message):
         if doc_files:
             theme_path = os.path.join(BASE_DATA_PATH, current_theme)
             os.makedirs(theme_path, exist_ok=True)
-            processing_msg = cl.Message(content=f"📥 归档到 `{current_theme}`...")
+            
+            # 保存文件
+            processing_msg = cl.Message(content=f"📥 文件已保存，正在快速处理文本...")
             await processing_msg.send()
 
             for doc in doc_files:
@@ -285,15 +339,52 @@ async def main(message: cl.Message):
                     with open(dest_path, "wb") as f_dst:
                         f_dst.write(f_src.read())
             
-            try:
-                cmd = ["python", PROCESS_SCRIPT_PATH, "--theme", current_theme, "--incremental"]
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    await processing_msg.update(content=f"✅ 主题 `{current_theme}` 更新完成！")
-                else:
-                    await processing_msg.update(content=f"❌ 失败:\n{result.stderr}")
-            except Exception as e:
-                await processing_msg.update(content=f"❌ 错误: {str(e)}")
+            # ==================================================
+            # 阶段 1: 快速文本模式 (阻塞等待，用户需等待几秒)
+            # ==================================================
+            # 注意：加上 --text_only 参数
+            cmd_text = ["python", PROCESS_SCRIPT_PATH, "--theme", current_theme, "--incremental", "--text_only"]
+            
+            # 使用同步方法的包装器
+            def run_text_sync():
+                return subprocess.run(cmd_text, capture_output=True, text=True)
+            
+            # 使用 cl.make_async 将其转为非阻塞调用，但这里我们要 await 结果
+            result_text = await cl.make_async(run_text_sync)()
+
+            if result_text.returncode == 0:
+                # 文本成功！更新UI告诉用户可以开始玩了
+                processing_msg.content = f"✅ **文本处理已完成！**\n(图片分析任务已在后台启动，您可以先针对文本内容提问...)"
+                await processing_msg.update()
+                
+                # ==================================================
+                # 阶段 2: 图片/OCR 模式 (Fire-and-Forget 后台任务)
+                # ==================================================
+                async def run_background_images():
+                    # 必须加 --incremental (防止清空刚才的文本) 和 --image_only
+                    cmd_img = ["python", PROCESS_SCRIPT_PATH, "--theme", current_theme, "--incremental", "--image_only"]
+                    
+                    print(f"DEBUG: 启动后台图片处理: {current_theme}")
+                    
+                    def run_img_sync():
+                        return subprocess.run(cmd_img, capture_output=True, text=True)
+                    
+                    # 异步运行，不等待
+                    res = await cl.make_async(run_img_sync)()
+                    
+                    if res.returncode == 0:
+                        print(f"DEBUG: 后台图片处理完成: {current_theme}")
+                    else:
+                        print(f"DEBUG: 后台图片处理失败: {res.stderr}")
+
+                # 关键：创建一个后台任务，不要 await 它！
+                asyncio.create_task(run_background_images())
+                
+            else:
+                # 文本处理都失败了，报错
+                processing_msg.content = f"❌ 文本处理失败:\n{result_text.stderr}"
+                await processing_msg.update()
+            
             docs_uploaded = True
 
         for element in message.elements:
@@ -305,6 +396,7 @@ async def main(message: cl.Message):
                 except: pass
 
     if docs_uploaded and not message.content:
+        await cl.Message(content="✅ 文件已接收，请开始提问。").send()
         return
 
     chat_manager.append_message("user", message.content)

@@ -8,6 +8,7 @@ from config import DATA_DIR, CHUNK_SIZE, CHUNK_OVERLAP, VECTOR_DB_PATH
 import base64
 from tqdm import tqdm
 from rag_agent import RAGAgent # 用于调用 Vision API
+import argparse
 
 
 # 你的基础数据路径
@@ -67,79 +68,97 @@ def process_images_with_vision_model(chunks):
 def main():
     # 1. 解析参数
     parser = argparse.ArgumentParser()
-    parser.add_argument("--theme", type=str, default=None, help="指定主题文件夹")
+    parser.add_argument("--theme", type=str, default="Default", help="指定主题文件夹") # 默认为 Default
     parser.add_argument("--incremental", action="store_true", help="增量更新模式")
+    parser.add_argument("--text_only", action="store_true", help="仅处理文本(快速模式)")
+    parser.add_argument("--image_only", action="store_true", help="仅处理图片(后台模式)")
     args = parser.parse_args()
 
     # 2. 确定路径
-    if args.theme:
-        target_dir = os.path.join(BASE_DATA_DIR, args.theme)
+    # 如果是 Default，可能指向根 data 目录，或者 data/Default，根据你的文件结构决定
+    # 这里假设 data 下面全是子文件夹
+    theme_name = args.theme
+    if theme_name == "default":
+        # 如果你想把 data 根目录作为默认
+        target_dir = BASE_DATA_DIR 
     else:
-        target_dir = BASE_DATA_DIR # 默认处理全部
+        target_dir = os.path.join(BASE_DATA_DIR, theme_name)
 
     if not os.path.exists(target_dir):
         print(f"目录不存在: {target_dir}")
         return
 
     print(f"📂 处理目录: {target_dir}")
+    print(f"📚 目标主题(Collection): {theme_name}")
 
-    # 3. 初始化
-    # 注意：DocumentLoader 会递归加载，所以如果是处理子文件夹，它只会加载该文件夹下的
+    # 3. 初始化 (传入 collection_name)
     loader = DocumentLoader(data_dir=target_dir)
     splitter = TextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-    vector_store = VectorStore(db_path=VECTOR_DB_PATH)
     
+    # 【关键修改】在这里传入 theme_name
+    vector_store = VectorStore(
+        db_path=VECTOR_DB_PATH, 
+        collection_name=theme_name 
+    )
+    
+    # 4. 清理策略 (针对当前 collection)
+    if args.image_only:
+        print("➕ 后台图片处理模式：强制使用增量更新...")
+        args.incremental = True
 
-    # 4. 清理策略
     if not args.incremental:
-        print("🧹 全量模式：清空数据库...")
-        vector_store.clear_collection()
+        print(f"🧹 全量模式：清空主题【{theme_name}】的数据...")
+        vector_store.clear_collection() # 这只会清空当前主题，不会影响其他主题
     else:
         print("➕ 增量模式：保留旧数据...")
 
-    # 5. 执行处理
+    # 5. 加载文档
     documents = loader.load_all_documents(specific_dir=target_dir)
     if not documents:
         print("⚠️ 该目录下没有文档")
         return
 
+    # 6. 分流处理
+    all_chunks = []
     
-# 6. 切分文档
-    # 注意：我们需要修改 TextSplitter 以跳过已经标记为 is_image 的块，或者在 split_documents 后处理
-    # 这里我们采用简单的策略：先切分文本，图片块保持原样
-    
-    # 临时策略：手动分离
-    raw_text_docs = [d for d in documents if not d.get("is_image")]
-    raw_image_docs = [d for d in documents if d.get("is_image")]
-    
-    # 切分文本
-    text_chunks = splitter.split_documents(raw_text_docs)
-    
-    # 合并图片块（无需切分，因为每个图片就是一个独立的知识点）
-    # 并且要给图片块加上必要的 chunk_id 等字段
-    image_chunks_formatted = []
-    for i, img_doc in enumerate(raw_image_docs):
-        img_doc["chunk_id"] = f"img_{i}"
-        image_chunks_formatted.append(img_doc)
+    # --- 分支 A: 处理文本 (只要没开启 image_only 就跑文本) ---
+    if not args.image_only:
+        print("🚀 [Text Mode] 正在处理文本...")
+        raw_text_docs = [d for d in documents if not d.get("is_image")]
+        text_chunks = splitter.split_documents(raw_text_docs)
+        all_chunks.extend(text_chunks)
+    else:
+        print("⏩ [Text Mode] 跳过文本处理")
+
+    # --- 分支 B: 处理图片 (只要没开启 text_only 就跑图片) ---
+    if not args.text_only:
+        print("👁️ [Vision Mode] 正在分析图片...")
+        raw_image_docs = [d for d in documents if d.get("is_image")]
         
-    all_chunks = text_chunks + image_chunks_formatted
-    
-    # 7. 关键步骤：调用视觉模型增强数据
-    # 只有当存在图片块时才调用
-    if image_chunks_formatted:
-        all_chunks = process_images_with_vision_model(all_chunks)
-    
-    print(f"💾 写入 {len(all_chunks)} 条数据 (含文本与图片描述)...")
-    
-    # 注意：确保 vector_store.add_documents 能处理 metadata 中的 None 值
-    # 最好在 add_documents 前把 metadata 清洗一下，把 None 转为空字符串
-    for chunk in all_chunks:
-        if "is_image" in chunk: del chunk["is_image"] # 清理标记
-        if chunk.get("image_path") is None: chunk["image_path"] = ""
-            
-    vector_store.add_documents(all_chunks)
-    
-    print("✅ 完成！")
+        image_chunks_formatted = []
+        for i, img_doc in enumerate(raw_image_docs):
+            img_doc["chunk_id"] = f"img_{i}"
+            image_chunks_formatted.append(img_doc)
+        
+        if image_chunks_formatted:
+            processed_imgs = process_images_with_vision_model(image_chunks_formatted)
+            all_chunks.extend(processed_imgs)
+    else:
+        print("⏩ [Vision Mode] 跳过图片处理 (将在后台运行)")
+
+    # 7. 写入数据库
+    if all_chunks:
+        print(f"💾 写入 {len(all_chunks)} 条数据...")
+        
+        # 清洗 metadata 防止 None 报错
+        for chunk in all_chunks:
+            if "is_image" in chunk: del chunk["is_image"]
+            if chunk.get("image_path") is None: chunk["image_path"] = ""
+                
+        vector_store.add_documents(all_chunks)
+        print("✅ 处理完成！")
+    else:
+        print("⚠️ 本次没有生成任何数据片段。")
 
 if __name__ == "__main__":
     main()

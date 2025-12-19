@@ -22,25 +22,29 @@ class VectorStore:
     def __init__(
         self,
         db_path: str = VECTOR_DB_PATH,
-        collection_name: str = COLLECTION_NAME,
+        collection_name: str = COLLECTION_NAME, # 默认值保留，但允许覆盖
         api_key: str = OPENAI_API_KEY,
         api_base: str = OPENAI_API_BASE,
     ):
         self.db_path = db_path
-        self.collection_name = collection_name
+        
+        # 【关键修改】对 collection_name 进行简单清洗，Chroma 要求名称不能含空格等特殊字符
+        # 这里我们将空格替换为下划线，确保兼容性
+        safe_name = collection_name.strip().replace(" ", "_").replace("-", "_")
+        self.collection_name = safe_name
 
-        # 初始化OpenAI客户端
         self.client = OpenAI(api_key=api_key, base_url=api_base)
 
-        # 初始化ChromaDB
         os.makedirs(db_path, exist_ok=True)
         self.chroma_client = chromadb.PersistentClient(
             path=db_path, settings=Settings(anonymized_telemetry=False)
         )
 
-        # 获取或创建collection
+        # 【关键修改】使用传入的 safe_name 创建或获取集合
+        print(f"📚 [VectorStore] 正在连接集合: {self.collection_name}")
         self.collection = self.chroma_client.get_or_create_collection(
-            name=collection_name, metadata={"description": "课程材料向量数据库"}
+            name=self.collection_name, 
+            metadata={"description": f"Theme: {collection_name}"}
         )
 
     def get_embedding(self, text: str) -> List[float]:

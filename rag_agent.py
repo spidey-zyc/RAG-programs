@@ -13,7 +13,7 @@ from config import (
 from vector_store import VectorStore
 
 class RAGAgent:
-    def __init__(self):
+    def __init__(self,initial_theme: str = "data_structure"):
         # 1. 初始化文本专用客户端 (使用原 Key)
         # 用于: Embedding, 纯文本问答
         self.text_client = OpenAI(
@@ -31,7 +31,8 @@ class RAGAgent:
         self.vision_model = VISION_MODEL_NAME
 
         # 初始化向量库
-        self.vector_store = VectorStore()
+        self.current_theme = initial_theme
+        self.vector_store = VectorStore(collection_name=initial_theme)
 
         self.system_prompt = """你是一名专业的课程助教。你的任务是根据提供的课程材料（Context）回答学生的问题。
 
@@ -238,3 +239,14 @@ class RAGAgent:
                 break
             except Exception as e:
                 print(f"\n错误: {str(e)}")
+    def reload_knowledge_base(self, theme_name: str):
+        """
+        【新增方法】用于在运行时切换知识库主题
+        """
+        if theme_name == self.current_theme:
+            return # 无需切换
+
+        print(f"🔄 [Agent] 正在切换知识库: {self.current_theme} -> {theme_name}")
+        self.current_theme = theme_name
+        # 重新实例化 VectorStore，指向新的 Collection
+        self.vector_store = VectorStore(collection_name=theme_name)
